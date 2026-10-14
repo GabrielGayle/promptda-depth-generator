@@ -2,6 +2,11 @@
 
 Deploy:
   modal deploy modal_app/worker.py
+
+Also serves a small public web endpoint for Strata (`DepthWorker.strata_api`):
+POST /strata {"image": <data URL or base64>, "mode": "relief"|"depth"}
+-> {"png": <data URL of the grey Strata plate>}. Browser origins allowed by
+STRATA_ORIGIN_REGEX (default: localhost and *.vercel.app).
 """
 
 from __future__ import annotations
@@ -43,6 +48,7 @@ image = (
         "timm",
         "pillow_heif>=0.13.0,<1.0",
         "trimesh",
+        "fastapi[standard]",
     )
     .env({"PROMPTDA_DEVICE": "cuda"})
     .add_local_dir("DepthPro", remote_path="/root/DepthPro", copy=True)
@@ -264,3 +270,80 @@ class DepthWorker:
         out["model_key"] = backend.key
         out["focallength_px"] = locked
         return out
+
+    @modal.asgi_app(label="strata-depth")
+    def strata_api(self):
+        """Public HTTP endpoint: photo in, grey Strata relief PNG out."""
+        import base64
+        import re
+
+        import cv2
+        from fastapi import FastAPI, HTTPException
+        from fastapi.middleware.cors import CORSMiddleware
+        from pydantic import BaseModel
+
+        from depth_core.strata_export import STRATA_MODES, render_strata_plate
+
+        web = FastAPI(docs_url=None, redoc_url=None)
+        web.add_middleware(
+            CORSMiddleware,
+            allow_origin_regex=os.environ.get(
+                "STRATA_ORIGIN_REGEX",
+                r"https?://(localhost|127\.0\.0\.1)(:\d+)?|https://[a-z0-9-]+\.vercel\.app",
+            ),
+            allow_methods=["POST"],
+            allow_headers=["Content-Type"],
+        )
+
+        class StrataBody(BaseModel):
+            image: str
+            mode: str = "relief"
+            matte: bool = True
+            max_side: int = 512
+            gc_alpha: float = 10.0
+            gamma: float = 1.0
+
+        max_bytes = 15 * 1024 * 1024
+
+        @web.post("/strata")
+        def strata(body: StrataBody) -> dict[str, Any]:
+            if body.mode not in STRATA_MODES:
+                raise HTTPException(400, f"mode must be one of {STRATA_MODES}")
+            raw = re.sub(r"^data:[^,]*,", "", body.image.strip())
+            try:
+                rgb_bytes = base64.b64decode(raw, validate=False)
+            except Exception as e:
+                raise HTTPException(400, "image is not valid base64") from e
+            if not rgb_bytes or len(rgb_bytes) > max_bytes:
+                raise HTTPException(413, "image must be under 15 MB")
+            t0 = time.perf_counter()
+            backend = self._get_backend("depth-pro")
+            with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as tmp:
+                tmp.write(rgb_bytes)
+                path = Path(tmp.name)
+            try:
+                _color, depth, _f = self._pipe._infer_depth_pro_focal(
+                    backend, path, f_px=None, max_size=756
+                )
+            except Exception as e:
+                raise HTTPException(422, f"Could not read image: {e}") from e
+            finally:
+                path.unlink(missing_ok=True)
+            plate = render_strata_plate(
+                depth,
+                mode=body.mode,
+                matte=body.matte,
+                gc_alpha=body.gc_alpha,
+                gamma=body.gamma,
+                max_side=max(64, min(1024, int(body.max_side))),
+            )
+            ok, png = cv2.imencode(".png", plate)
+            if not ok:
+                raise HTTPException(500, "PNG encode failed")
+            out = self._billing(t0)
+            out["png"] = "data:image/png;base64," + base64.b64encode(png.tobytes()).decode()
+            out["width"] = int(plate.shape[1])
+            out["height"] = int(plate.shape[0])
+            return out
+
+        return web
