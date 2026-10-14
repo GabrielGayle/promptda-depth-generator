@@ -1580,6 +1580,44 @@ def export_run_npz(run_id: str):
     )
 
 
+@router.get("/runs/{run_id}/export/strata")
+def export_run_strata(
+    run_id: str,
+    mode: str = "relief",
+    matte: bool = True,
+    gc_alpha: float = 10.0,
+    gamma: float = 1.0,
+    max_side: int = 512,
+):
+    """8-bit grey PNG for Strata image slots: near subject = dark, background = white."""
+    state = get_run(run_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    depth = state.get("depth")
+    if depth is None:
+        raise HTTPException(status_code=400, detail="Run has no depth yet")
+
+    from depth_core.strata_export import STRATA_MODES, export_strata_png
+
+    if mode not in STRATA_MODES:
+        raise HTTPException(status_code=400, detail=f"mode must be one of {STRATA_MODES}")
+    try:
+        path = export_strata_png(
+            Path(state["out_dir"]),
+            run_id,
+            depth,
+            cliff=state.get("cliff"),
+            mode=mode,
+            matte=bool(matte),
+            gc_alpha=float(gc_alpha),
+            gamma=float(gamma),
+            max_side=int(np.clip(max_side, 64, 2048)),
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Strata export failed: {e}") from e
+    return FileResponse(path, media_type="image/png", filename=path.name)
+
+
 class BlenderOpenBody(BlenderExportBody):
     open: bool = True
 

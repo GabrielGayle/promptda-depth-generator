@@ -1188,6 +1188,8 @@ export function OutputNode({ id, data, selected }: NodeProps) {
   const src = outputUrl ? bust(outputUrl, evalToken) : null;
   const npzHref =
     runId && src ? bust(`/api/runs/${runId}/export/npz`, evalToken) : null;
+  const strataHref =
+    runId && src ? bust(`/api/runs/${runId}/export/strata`, evalToken) : null;
 
   return (
     <Shell title="Output" selected={selected} wide>
@@ -1240,6 +1242,16 @@ export function OutputNode({ id, data, selected }: NodeProps) {
               title="Float32 depth (m), inv_smooth, valid mask, rgb + output plates"
             >
               NPZ
+            </a>
+          ) : null}
+          {strataHref && !isVideo ? (
+            <a
+              href={strataHref}
+              download
+              className="dl-output-dl"
+              title="Grey bas-relief PNG for Strata: near = dark, background = white"
+            >
+              Strata
             </a>
           ) : null}
         </div>
