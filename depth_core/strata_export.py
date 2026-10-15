@@ -8,6 +8,7 @@ background = white, 8-bit, small (Strata downsamples to 256 px anyway).
 
 from __future__ import annotations
 
+import base64
 from pathlib import Path
 from typing import Optional
 
@@ -37,28 +38,11 @@ def render_strata_plate(
     mode "relief": the same, then Weyrich bas-relief compression so fine
     detail survives being squashed into a few millimetres of plate.
     """
-    from depth_core.pipeline import (
-        _prepare_inv_smooth,
-        _scenery_depth_window,
-        _subject_hi_pct,
-        _subject_matte,
-        depth_valid_mask,
-    )
+    from depth_core.pipeline import _prepare_inv_smooth
 
     depth = np.asarray(depth_m, dtype=np.float64)
-    valid = depth_valid_mask(depth)
-    if not valid.any():
-        raise ValueError("Depth has no valid pixels")
+    valid, keep = _subject_keep(depth, matte=matte, cliff=cliff)
     _, inv = _prepare_inv_smooth(depth)
-
-    keep = valid.astype(np.float32)
-    if matte:
-        c = float(cliff) if cliff is not None else float(_subject_hi_pct(depth))
-        near, _far, cut = _scenery_depth_window(depth, c)
-        keep = np.clip(_subject_matte(depth, cut, near), 0.0, 1.0).astype(np.float32)
-        keep *= valid
-        if float(keep.max()) < 0.5:
-            keep = valid.astype(np.float32)  # no clear subject: keep whole scene
 
     region = keep > 0.5
     lo, hi = np.percentile(inv[region], [2.0, 98.0])
@@ -95,6 +79,86 @@ def render_strata_plate(
             interpolation=cv2.INTER_AREA,
         )
     return np.clip(np.round(grey * 255.0), 0, 255).astype(np.uint8)
+
+
+def _subject_keep(
+    depth: np.ndarray, *, matte: bool, cliff: Optional[float] = None
+) -> tuple[np.ndarray, np.ndarray]:
+    """(valid mask, 0..1 subject matte). Without matte the whole valid scene is kept."""
+    from depth_core.pipeline import (
+        _scenery_depth_window,
+        _subject_hi_pct,
+        _subject_matte,
+        depth_valid_mask,
+    )
+
+    valid = depth_valid_mask(depth)
+    if not valid.any():
+        raise ValueError("Depth has no valid pixels")
+    keep = valid.astype(np.float32)
+    if matte:
+        c = float(cliff) if cliff is not None else float(_subject_hi_pct(depth))
+        near, _far, cut = _scenery_depth_window(depth, c)
+        keep = np.clip(_subject_matte(depth, cut, near), 0.0, 1.0).astype(np.float32)
+        keep *= valid
+        if float(keep.max()) < 0.5:
+            keep = valid.astype(np.float32)  # no clear subject: keep whole scene
+    return valid, keep
+
+
+def strata_depth_payload(
+    depth_m: np.ndarray,
+    *,
+    matte: bool = True,
+    cliff: Optional[float] = None,
+    max_side: int = 512,
+) -> dict:
+    """The metric depth itself, for Strata to window and shape in the browser.
+
+    data: base64 little-endian uint16, row-major. 0 = no depth (sky / invalid);
+    1..65535 map linearly onto min_m..max_m metres. mask: base64 uint8 subject
+    matte (255 = keep) or None. near_m / far_m: the window the grey plate uses
+    (2nd / 98th percentile of inverse depth over the subject), as a starting point.
+    """
+    depth = np.asarray(depth_m, dtype=np.float64)
+    valid, keep = _subject_keep(depth, matte=matte, cliff=cliff)
+
+    region = keep > 0.5
+    inv = 1.0 / np.clip(depth[region], 1e-4, None)
+    lo, hi = np.percentile(inv, [2.0, 98.0])
+    near_m, far_m = 1.0 / max(float(hi), 1e-9), 1.0 / max(float(lo), 1e-9)
+
+    vals = depth[valid]
+    d_min = float(vals.min())
+    d_max = max(float(np.percentile(vals, 99.5)), far_m * 1.5, d_min + 1e-3)
+
+    rows, cols = depth.shape
+    side = int(max(64, max_side))
+    if max(rows, cols) > side:
+        s = side / float(max(rows, cols))
+        size = (max(2, round(cols * s)), max(2, round(rows * s)))
+        filled = np.where(valid, np.clip(depth, d_min, d_max), 0.0).astype(np.float32)
+        w = cv2.resize(valid.astype(np.float32), size, interpolation=cv2.INTER_AREA)
+        depth = cv2.resize(filled, size, interpolation=cv2.INTER_AREA) / np.maximum(w, 1e-6)
+        valid = w > 0.5
+        keep = cv2.resize(keep, size, interpolation=cv2.INTER_AREA)
+
+    q = np.zeros(depth.shape, dtype="<u2")
+    t = (np.clip(depth, d_min, d_max) - d_min) / (d_max - d_min)
+    q[valid] = (1 + np.round(t[valid] * 65534)).astype("<u2")
+    mask = None
+    if matte:
+        mask = base64.b64encode(np.clip(np.round(keep * 255), 0, 255).astype(np.uint8).tobytes()).decode()
+    return {
+        "w": int(q.shape[1]),
+        "h": int(q.shape[0]),
+        "min_m": d_min,
+        "max_m": d_max,
+        "near_m": near_m,
+        "far_m": far_m,
+        "data": base64.b64encode(q.tobytes()).decode(),
+        "mask": mask,
+    }
 
 
 def export_strata_png(

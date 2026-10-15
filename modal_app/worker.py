@@ -5,7 +5,9 @@ Deploy:
 
 Also serves a small public web endpoint for Strata (`DepthWorker.strata_api`):
 POST /strata {"image": <data URL or base64>, "mode": "relief"|"depth"}
--> {"png": <data URL of the grey Strata plate>}. Browser origins allowed by
+-> {"png": <data URL of the grey Strata plate>}. With "return_depth": true the
+reply also carries "depth": the metric depth as uint16 (see
+strata_depth_payload) so Strata can set near / far / curve live. Browser origins allowed by
 STRATA_ORIGIN_REGEX (default: localhost and *.vercel.app).
 """
 
@@ -72,6 +74,9 @@ class StrataBody(BaseModel):
     max_side: int = 512
     gc_alpha: float = 10.0
     gamma: float = 1.0
+    # Also return the metric depth (uint16) so Strata can set near / far / curve itself.
+    return_depth: bool = False
+    depth_side: int = 512
 
 
 checkpoints = modal.Volume.from_name(
@@ -295,7 +300,11 @@ class DepthWorker:
         from fastapi import FastAPI, HTTPException
         from fastapi.middleware.cors import CORSMiddleware
 
-        from depth_core.strata_export import STRATA_MODES, render_strata_plate
+        from depth_core.strata_export import (
+            STRATA_MODES,
+            render_strata_plate,
+            strata_depth_payload,
+        )
 
         web = FastAPI(docs_url=None, redoc_url=None)
         web.add_middleware(
@@ -349,6 +358,12 @@ class DepthWorker:
             out["png"] = "data:image/png;base64," + base64.b64encode(png.tobytes()).decode()
             out["width"] = int(plate.shape[1])
             out["height"] = int(plate.shape[0])
+            if body.return_depth:
+                out["depth"] = strata_depth_payload(
+                    depth,
+                    matte=body.matte,
+                    max_side=max(64, min(1024, int(body.depth_side))),
+                )
             return out
 
         return web
