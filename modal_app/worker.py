@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 import modal
+from pydantic import BaseModel
 
 APP_NAME = "depth-ledger"
 GPU_TYPE = "T4"
@@ -59,6 +60,19 @@ image = (
         "pip install -e /root/PromptDA",
     )
 )
+
+class StrataBody(BaseModel):
+    """POST /strata body. Module level so FastAPI can resolve it: with
+    `from __future__ import annotations`, a class local to strata_api() reads
+    as an unknown name and FastAPI falls back to a `body` query param (422)."""
+
+    image: str
+    mode: str = "relief"
+    matte: bool = True
+    max_side: int = 512
+    gc_alpha: float = 10.0
+    gamma: float = 1.0
+
 
 checkpoints = modal.Volume.from_name(
     "depth-ledger-checkpoints", create_if_missing=True
@@ -280,7 +294,6 @@ class DepthWorker:
         import cv2
         from fastapi import FastAPI, HTTPException
         from fastapi.middleware.cors import CORSMiddleware
-        from pydantic import BaseModel
 
         from depth_core.strata_export import STRATA_MODES, render_strata_plate
 
@@ -294,14 +307,6 @@ class DepthWorker:
             allow_methods=["POST"],
             allow_headers=["Content-Type"],
         )
-
-        class StrataBody(BaseModel):
-            image: str
-            mode: str = "relief"
-            matte: bool = True
-            max_side: int = 512
-            gc_alpha: float = 10.0
-            gamma: float = 1.0
 
         max_bytes = 15 * 1024 * 1024
 
