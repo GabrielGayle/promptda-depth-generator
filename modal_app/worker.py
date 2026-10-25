@@ -8,7 +8,7 @@ POST /strata {"image": <data URL or base64>, "mode": "relief"|"depth"}
 -> {"png": <data URL of the grey Strata plate>}. With "return_depth": true the
 reply also carries "depth": the metric depth as uint16 (see
 strata_depth_payload) so Strata can set near / far / curve live. Browser origins allowed by
-STRATA_ORIGIN_REGEX (default: localhost and *.vercel.app).
+STRATA_ORIGIN_REGEX (default: localhost, *.vercel.app and *.cockpit.yoga).
 """
 
 from __future__ import annotations
@@ -311,7 +311,8 @@ class DepthWorker:
             CORSMiddleware,
             allow_origin_regex=os.environ.get(
                 "STRATA_ORIGIN_REGEX",
-                r"https?://(localhost|127\.0\.0\.1)(:\d+)?|https://[a-z0-9-]+\.vercel\.app",
+                r"https?://(localhost|127\.0\.0\.1)(:\d+)?|https://[a-z0-9-]+\.vercel\.app"
+                r"|https://([a-z0-9-]+\.)?cockpit\.yoga",
             ),
             allow_methods=["POST"],
             allow_headers=["Content-Type"],
